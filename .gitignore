@@ -1,0 +1,24 @@
+# Ignore PDF files and folders
+pdfs/
+*.pdf
+
+output/
+
+# Ignore keyword list file
+keywords.txt
+
+# Ignore output files
+*.csv
+*.xlsx
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore virtual environment
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
