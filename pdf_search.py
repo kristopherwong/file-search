@@ -12,6 +12,9 @@ import json
 
 # === REGEX ===
 url_regex = re.compile(r"https?://[^\s<>)\"']+")
+# Generic Bates-style reference number: a short letter prefix followed by a
+# padded run of digits (e.g. "ACME-000123", "SMITH_0001234", "ABC000123").
+generic_bates_regex = re.compile(r"\b[A-Za-z]{1,10}[_\-]?\d{3,10}\b")
 
 def get_base_url(url):
     try:
@@ -58,7 +61,7 @@ def parse_args():
     parser.add_argument("--keywords", nargs="*", default=[], help="Search for specific keywords")
     parser.add_argument("--keywords-file", help="Path to file with one keyword per line")
     parser.add_argument("--bates-footer-prefix", help="Prefix string to identify Bates numbers in the bottom-right footer of each page (e.g. 'MyCompany')")
-    parser.add_argument("--bates-body-prefix", help="Prefix string to identify Bates numbers anywhere in a page's visible text/content, not just the footer (e.g. 'MyCompany')")
+    parser.add_argument("--bates-body", action="store_true", help="Search each page's visible text/content for any Bates-style reference numbers (any prefix), not just the footer. Useful for capturing Bates numbers cited from other document sets.")
     parser.add_argument("--context-window", type=int, default=100, help="Number of characters prepending and appending matched string that are returned in 'Context' parameter of 'References' column")
 
     return parser.parse_args()
@@ -114,6 +117,7 @@ def main():
 
     link_results = []
     keyword_results = []
+    bates_results = []
 
     if args.folder:
         pdf_files = []
@@ -133,7 +137,7 @@ def main():
             doc = fitz.open(filepath)
 
             for page_num, page in enumerate(doc, start=1):
-                need_text = args.text_urls or args.keywords or args.bates_body_prefix
+                need_text = args.text_urls or args.keywords or args.bates_body
                 if need_text:
                     text = page.get_text("text")
                     # Clean full page text before matching (safe replacement for display only)
@@ -148,19 +152,27 @@ def main():
                     if footer_matches:
                         bates_id_footer = footer_matches[-1]  # Last match in the footer
 
-                # Extract Bates number anywhere in the page's visible content
-                bates_id_body = None
-                if args.bates_body_prefix:
-                    body_pattern = re.compile(rf"{re.escape(args.bates_body_prefix)}[_\-]?\d+", re.IGNORECASE)
-                    body_matches = body_pattern.findall(text)
-                    if body_matches:
-                        bates_id_body = body_matches[-1]  # Last match on the page
-
                 bates_fields = {}
                 if args.bates_footer_prefix:
                     bates_fields["Bates ID (Footer)"] = bates_id_footer
-                if args.bates_body_prefix:
-                    bates_fields["Bates ID (Body)"] = bates_id_body
+
+                # Every Bates-style reference number found anywhere in the page's
+                # visible content, regardless of prefix, with surrounding context
+                if args.bates_body:
+                    for match in generic_bates_regex.finditer(text):
+                        match_start = match.start()
+                        match_end = match.end()
+                        context = clean_context_string(
+                            extract_context(text, match_start, match_end, args.context_window)
+                        )
+                        bates_results.append({
+                            "Filename": filename,
+                            "Page": page_num,
+                            "Match Type": "bates_body",
+                            "Matched String": match.group(),
+                            "Context": context,
+                            **bates_fields
+                        })
 
                 # Link annotations
                 # --- Link annotations ---
@@ -224,6 +236,7 @@ def main():
 
     df_links=pd.DataFrame()
     df_keywords=pd.DataFrame()
+    df_bates=pd.DataFrame()
 
     if link_results:
         # Create dataframe from raw link results
@@ -231,7 +244,7 @@ def main():
 
         # Group by exact URL
         grouped_links = df_links_raw.groupby("Matched String")
-        bates_columns = [c for c in ("Bates ID (Footer)", "Bates ID (Body)") if c in df_links_raw.columns]
+        bates_columns = [c for c in ("Bates ID (Footer)",) if c in df_links_raw.columns]
 
         merged_link_rows = []
 
@@ -265,7 +278,7 @@ def main():
 
         # Group by exact matched keyword
         grouped_keywords = df_keywords_raw.groupby("Matched String")
-        bates_columns = [c for c in ("Bates ID (Footer)", "Bates ID (Body)") if c in df_keywords_raw.columns]
+        bates_columns = [c for c in ("Bates ID (Footer)",) if c in df_keywords_raw.columns]
 
         merged_keyword_rows = []
 
@@ -291,8 +304,37 @@ def main():
         df_keywords = pd.DataFrame(merged_keyword_rows)
         df_keywords.sort_values(by=["Reference Count", "Matched String"], ascending=[False, True], inplace=True)
 
+    if bates_results:
+        # Create dataframe from raw body Bates number results
+        df_bates_raw = pd.DataFrame(bates_results)
+
+        # Group by exact matched Bates number
+        grouped_bates = df_bates_raw.groupby("Matched String")
+        bates_columns = [c for c in ("Bates ID (Footer)",) if c in df_bates_raw.columns]
+
+        merged_bates_rows = []
+
+        for bates_number, group in grouped_bates:
+            references = group.apply(
+                lambda row: {
+                    "Filename": row["Filename"],
+                    "Page": row["Page"],
+                    "Context": row["Context"],
+                    **{col: row[col] for col in bates_columns}
+                }, axis=1
+            ).tolist()
+
+            merged_bates_rows.append({
+                "Matched String": bates_number,
+                "Reference Count": len(references),
+                "References": references
+            })
+
+        df_bates = pd.DataFrame(merged_bates_rows)
+        df_bates.sort_values(by=["Reference Count", "Matched String"], ascending=[False, True], inplace=True)
+
     json_folder = os.path.join(output_dir, "references_json")
-    if not df_links.empty or not df_keywords.empty:
+    if not df_links.empty or not df_keywords.empty or not df_bates.empty:
         with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
             if not df_links.empty:
                 df_links["References"] = df_links.apply(
@@ -314,6 +356,16 @@ def main():
                     axis=1
 )
                 df_keywords.to_excel(writer, sheet_name="Keywords", index=False)
+            if not df_bates.empty:
+                df_bates["References"] = df_bates.apply(
+                    lambda row: save_large_json(
+                        row["References"],
+                        base_filename=f"{row['Matched String'][:50].strip().replace('/', '_')}_bates",
+                        folder=json_folder
+                    ),
+                    axis=1
+                )
+                df_bates.to_excel(writer, sheet_name="Bates Numbers", index=False)
 
         format_excel(excel_path)
         print(f"📘 Excel saved to {excel_path}")

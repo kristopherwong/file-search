@@ -24,10 +24,15 @@ specific links or terms without opening each file by hand.
   numbers in the bottom-right corner of each page matching a given prefix
   (e.g. `MyCompany_000123`), and attaches the detected ID to every match
   found on that page.
-- **Bates numbering — body** (`--bates-body-prefix`): detects Bates numbers
-  anywhere in a page's visible text/content (not just the footer), useful
-  when stamps aren't confined to the bottom-right corner. Can be used
-  together with `--bates-footer-prefix` to capture both independently.
+- **Bates numbering — body** (`--bates-body`): scans each page's visible
+  text/content for *any* Bates-style reference numbers (letter prefix +
+  padded digit run, e.g. `ACME-000123`), regardless of prefix — not just the
+  page's own stamp. Useful for catching Bates numbers cited in the document
+  body that reference other document sets. Each match gets its own `Context`
+  snippet, and results are grouped into a dedicated `Bates Numbers` sheet
+  (same structure as the `Keywords` sheet). Can be combined with
+  `--bates-footer-prefix`, which is attached to each body match's reference
+  entry for cross-referencing.
 - **Context extraction**: each match includes surrounding text
   (`--context-window` characters before/after) to help you see it in
   context without opening the source PDF.
@@ -86,7 +91,7 @@ any output; the script does nothing on its own.
 | `--keywords WORD [WORD ...]` | One or more keywords/phrases to search for (case-insensitive, literal match). Can be combined with `--keywords-file`. |
 | `--keywords-file PATH` | Path to a text file with one keyword per line; appended to `--keywords`. |
 | `--bates-footer-prefix PREFIX` | Prefix used to identify Bates numbers in the bottom-right footer of each page (e.g. `MyCompany` matches `MyCompany_000123`). Adds a `Bates ID (Footer)` column to results. |
-| `--bates-body-prefix PREFIX` | Prefix used to identify Bates numbers anywhere in a page's visible text/content, not just the footer. Adds a `Bates ID (Body)` column to results. Can be combined with `--bates-footer-prefix`. |
+| `--bates-body` | Scan each page's visible text/content for any Bates-style reference numbers (any prefix), not just the footer. Each match is captured with its own `Context` snippet and grouped into a `Bates Numbers` sheet. Can be combined with `--bates-footer-prefix`. |
 | `--context-window N` | Number of characters of surrounding text to include before/after each match in the `Context` column. Default: `100`. |
 
 ### Examples
@@ -109,13 +114,14 @@ Search using a keyword list file, with a wider context window:
 python3 pdf_search.py ./docs --folder --keywords-file terms.txt --context-window 200
 ```
 
-Tag matches with both footer and body Bates numbers (useful when stamps aren't
-confined to the bottom-right corner):
+Tag matches with both the page's own footer Bates number and any Bates
+numbers referenced elsewhere in the page content (e.g. citations to other
+document sets):
 
 ```bash
 python3 pdf_search.py ./docs --folder --keywords-file terms.txt \
   --bates-footer-prefix ACME \
-  --bates-body-prefix ACME
+  --bates-body
 ```
 
 Do everything at once, over a folder, with a custom output filename:
@@ -139,13 +145,17 @@ incrementing with `_1`, `_2`, ... if the name is already taken), containing:
     one row per unique URL, with `Base URL` (domain), `Match Type`
     (`link` or `text_url`), `Reference Count`, and `References` (list of
     every filename/page/context where it appeared, plus `Bates ID (Footer)`
-    and/or `Bates ID (Body)` if those options were used).
+    if that option was used).
   - **`Keywords` sheet** (if keywords used): one row per unique matched
     keyword, with `Match Type`, `Reference Count`, and `References` (same
     structure as above).
+  - **`Bates Numbers` sheet** (if `--bates-body` used): one row per unique
+    Bates-style number found anywhere in the page content, with
+    `Reference Count` and `References` (filename/page/context for every
+    occurrence, plus `Bates ID (Footer)` if that option was also used).
 - **`references_json/`** — JSON files for any match whose full reference
   list was too large to embed directly in the spreadsheet cell; the cell
   will contain a `[See <file>.json]` pointer instead.
 
-If no links or keywords are found, no Excel file is written and the script
-prints a message to that effect.
+If no links, keywords, or Bates numbers are found, no Excel file is written
+and the script prints a message to that effect.
