@@ -1,9 +1,10 @@
 # pdf_search.py
 
 A command-line tool for bulk-scanning a folder of PDFs to extract embedded
-links, URLs found in visible text, keyword matches, and (optionally) Bates
-numbers. Results are aggregated and written to a formatted Excel workbook,
-with large reference lists offloaded to companion JSON files.
+links, URLs found in visible text, keyword matches, (optionally) Bates
+numbers, and (optionally) citations of file names (source code or specific
+extensions). Results are aggregated and written to a formatted Excel
+workbook, with large reference lists offloaded to companion JSON files.
 
 Useful for document review, e-discovery, and auditing large sets of PDFs for
 specific links or terms without opening each file by hand.
@@ -33,15 +34,25 @@ specific links or terms without opening each file by hand.
   (same structure as the `Keywords` sheet). Can be combined with
   `--bates-footer-prefix`, which is attached to each body match's reference
   entry for cross-referencing.
+- **File citation search** (`--source-code`, `--file-ext`): scans each
+  page's visible text for citations of file names — either common source-code
+  file names (`.py`, `.js`, `.ts`, `.java`, `.c`, ...) via `--source-code`,
+  or any specific extension(s) you name via `--file-ext py txt`, etc. The two
+  options combine into a single search. Each match keeps its own `Context`
+  snippet, and results are grouped by file path into a dedicated
+  `File Citations` sheet (same structure as the `Bates Numbers` sheet). Useful
+  for finding where a brief, memo, or transcript cites particular source files
+  or documents by name.
 - **Context extraction**: each match includes surrounding text
   (`--context-window` characters before/after) to help you see it in
   context without opening the source PDF.
-- **De-duplication & grouping**: matches are grouped by exact URL/keyword
-  across the whole document set, with a reference count and a list of every
-  file/page/context where it occurred.
+- **De-duplication & grouping**: matches are grouped by exact URL/keyword/Bates number/file
+  name across the whole document set, with a reference count and a list of
+  every file/page/context where it occurred.
 - **Excel output**: results are written to an auto-formatted `.xlsx` file
-  (bold headers, wrapped text, auto-sized columns), with a `URLs` sheet and/or
-  `Keywords` sheet depending on which options were used.
+  (bold headers, wrapped text, auto-sized columns), with any combination of
+  `URLs`, `Keywords`, `Bates Numbers`, and `File Citations` sheets depending
+  on which options were used.
 - **Overflow handling**: if a match's reference list is too large to fit
   cleanly in a cell, it's saved to a separate JSON file in a
   `references_json/` subfolder, and the cell instead shows a pointer like
@@ -76,8 +87,9 @@ python3 pdf_search.py <path> [options]
 `<path>` is the only required argument. By default it's treated as a single
 PDF file. Pass `--folder` to instead treat it as a folder, which will be
 scanned recursively for `.pdf` files. You must also pass at least one of
-`--link-annotations`, `--text-urls`, or `--keywords`/`--keywords-file` to get
-any output; the script does nothing on its own.
+`--link-annotations`, `--text-urls`, `--keywords`/`--keywords-file`,
+`--bates-body`, `--source-code`, or `--file-ext` to get any output; the script
+does nothing on its own.
 
 ### Options
 
@@ -92,6 +104,8 @@ any output; the script does nothing on its own.
 | `--keywords-file PATH` | Path to a text file with one keyword per line; appended to `--keywords`. |
 | `--bates-footer-prefix PREFIX` | Prefix used to identify Bates numbers in the bottom-right footer of each page (e.g. `MyCompany` matches `MyCompany_000123`). Adds a `Bates ID (Footer)` column to results. |
 | `--bates-body` | Scan each page's visible text/content for any Bates-style reference numbers (any prefix), not just the footer. Each match is captured with its own `Context` snippet and grouped into a `Bates Numbers` sheet. Can be combined with `--bates-footer-prefix`. |
+| `--source-code` | Search each page's visible text for citations of common source code file names (`.py`, `.js`, `.ts`, `.jsx`, `.tsx`, `.c`, `.h`, `.cpp`, `.hpp`, `.cs`, `.java`, `.rb`, `.go`, `.rs`, `.swift`, `.kt`, `.scala`, `.php`, `.sh`, `.bash`, `.ps1`, `.m`, `.mm`, `.lua`, `.pl`, `.r`). Can be combined with `--file-ext`. |
+| `--file-ext EXT [EXT ...]` | One or more specific file extensions to search for (e.g. `--file-ext py txt`). Accepts extensions with or without a leading dot. Can be combined with `--source-code` to search both sets at once. |
 | `--context-window N` | Number of characters of surrounding text to include before/after each match in the `Context` column. Default: `100`. |
 
 ### Examples
@@ -124,6 +138,19 @@ python3 pdf_search.py ./docs --folder --keywords-file terms.txt \
   --bates-body
 ```
 
+Find every source-code file cited in the documents:
+
+```bash
+python3 pdf_search.py ./docs --folder --source-code
+```
+
+Find citations of specific file types (any extensions you name), including
+non-source ones like Office documents:
+
+```bash
+python3 pdf_search.py ./docs --folder --file-ext pdf docx csv
+```
+
 Do everything at once, over a folder, with a custom output filename:
 
 ```bash
@@ -132,6 +159,9 @@ python3 pdf_search.py ./docs --folder \
   --text-urls \
   --keywords-file terms.txt \
   --bates-footer-prefix ACME \
+  --bates-body \
+  --source-code \
+  --file-ext pdf \
   --output review_results.xlsx
 ```
 
@@ -153,9 +183,14 @@ incrementing with `_1`, `_2`, ... if the name is already taken), containing:
     Bates-style number found anywhere in the page content, with
     `Reference Count` and `References` (filename/page/context for every
     occurrence, plus `Bates ID (Footer)` if that option was also used).
+  - **`File Citations` sheet** (if `--source-code` and/or `--file-ext`
+    used): one row per unique cited file path, with `Match Type`
+    (`file_citation`), `Reference Count`, and `References`
+    (filename/page/context for every occurrence, plus `Bates ID (Footer)`
+    if that option was also used).
 - **`references_json/`** — JSON files for any match whose full reference
   list was too large to embed directly in the spreadsheet cell; the cell
   will contain a `[See <file>.json]` pointer instead.
 
-If no links, keywords, or Bates numbers are found, no Excel file is written
-and the script prints a message to that effect.
+If no links, keywords, Bates numbers, or file citations are found, no Excel
+file is written and the script prints a message to that effect.

@@ -16,6 +16,17 @@ url_regex = re.compile(r"https?://[^\s<>)\"']+")
 # padded run of digits (e.g. "ACME-000123", "SMITH_0001234", "ABC000123").
 generic_bates_regex = re.compile(r"\b[A-Za-z]{1,10}[_\-]?\d{3,10}\b")
 
+# Known source code file extensions (used with --source-code)
+SOURCE_CODE_EXTENSIONS = [
+    "py", "js", "ts", "jsx", "tsx", "c", "h", "cpp", "hpp", "cc", "cs",
+    "java", "rb", "go", "rs", "swift", "kt", "kts", "scala", "php",
+    "sh", "bash", "ps1", "m", "mm", "lua", "pl", "r",
+]
+
+def build_file_pattern(extensions):
+    ext_alts = "|".join(re.escape(e) for e in extensions)
+    return re.compile(rf"\b[\w.\-/\\]+\.(?:{ext_alts})\b", re.IGNORECASE)
+
 def get_base_url(url):
     try:
         parsed = urlparse(url)
@@ -62,6 +73,8 @@ def parse_args():
     parser.add_argument("--keywords-file", help="Path to file with one keyword per line")
     parser.add_argument("--bates-footer-prefix", help="Prefix string to identify Bates numbers in the bottom-right footer of each page (e.g. 'MyCompany')")
     parser.add_argument("--bates-body", action="store_true", help="Search each page's visible text/content for any Bates-style reference numbers (any prefix), not just the footer. Useful for capturing Bates numbers cited from other document sets.")
+    parser.add_argument("--source-code", action="store_true", help="Search each page's visible text for citations of common source code file names (e.g. .py, .js, .java, .c, .ts, ...).")
+    parser.add_argument("--file-ext", nargs="+", default=[], help="Search each page's visible text for citations of file names with a specific extension (e.g. --file-ext py txt).")
     parser.add_argument("--context-window", type=int, default=100, help="Number of characters prepending and appending matched string that are returned in 'Context' parameter of 'References' column")
 
     return parser.parse_args()
@@ -118,6 +131,17 @@ def main():
     link_results = []
     keyword_results = []
     bates_results = []
+    file_results = []
+
+    # Build a combined set of extensions to search for, plus a single regex.
+    ext_set = set()
+    if args.source_code:
+        ext_set.update(SOURCE_CODE_EXTENSIONS)
+    for e in args.file_ext:
+        e = e.lstrip(".")
+        if e:
+            ext_set.add(e.lower())
+    file_ext_regex = build_file_pattern(sorted(ext_set)) if ext_set else None
 
     if args.folder:
         pdf_files = []
@@ -137,7 +161,7 @@ def main():
             doc = fitz.open(filepath)
 
             for page_num, page in enumerate(doc, start=1):
-                need_text = args.text_urls or args.keywords or args.bates_body
+                need_text = args.text_urls or args.keywords or args.bates_body or file_ext_regex is not None
                 if need_text:
                     text = page.get_text("text")
                     # Clean full page text before matching (safe replacement for display only)
@@ -169,6 +193,23 @@ def main():
                             "Filename": filename,
                             "Page": page_num,
                             "Match Type": "bates_body",
+                            "Matched String": match.group(),
+                            "Context": context,
+                            **bates_fields
+                        })
+
+                # File-name citations (source code and/or specific extensions)
+                if file_ext_regex is not None:
+                    for match in file_ext_regex.finditer(text):
+                        match_start = match.start()
+                        match_end = match.end()
+                        context = clean_context_string(
+                            extract_context(text, match_start, match_end, args.context_window)
+                        )
+                        file_results.append({
+                            "Filename": filename,
+                            "Page": page_num,
+                            "Match Type": "file_citation",
                             "Matched String": match.group(),
                             "Context": context,
                             **bates_fields
@@ -237,6 +278,7 @@ def main():
     df_links=pd.DataFrame()
     df_keywords=pd.DataFrame()
     df_bates=pd.DataFrame()
+    df_files=pd.DataFrame()
 
     if link_results:
         # Create dataframe from raw link results
@@ -333,8 +375,37 @@ def main():
         df_bates = pd.DataFrame(merged_bates_rows)
         df_bates.sort_values(by=["Reference Count", "Matched String"], ascending=[False, True], inplace=True)
 
+    if file_results:
+        # Create dataframe from raw file-citation results
+        df_files_raw = pd.DataFrame(file_results)
+
+        grouped_files = df_files_raw.groupby("Matched String")
+        bates_columns = [c for c in ("Bates ID (Footer)",) if c in df_files_raw.columns]
+
+        merged_file_rows = []
+
+        for file_name, group in grouped_files:
+            references = group.apply(
+                lambda row: {
+                    "Filename": row["Filename"],
+                    "Page": row["Page"],
+                    "Context": row["Context"],
+                    **{col: row[col] for col in bates_columns}
+                }, axis=1
+            ).tolist()
+
+            merged_file_rows.append({
+                "Matched String": file_name,
+                "Match Type": group["Match Type"].iloc[0],
+                "Reference Count": len(references),
+                "References": references
+            })
+
+        df_files = pd.DataFrame(merged_file_rows)
+        df_files.sort_values(by=["Reference Count", "Matched String"], ascending=[False, True], inplace=True)
+
     json_folder = os.path.join(output_dir, "references_json")
-    if not df_links.empty or not df_keywords.empty or not df_bates.empty:
+    if not df_links.empty or not df_keywords.empty or not df_bates.empty or not df_files.empty:
         with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
             if not df_links.empty:
                 df_links["References"] = df_links.apply(
@@ -366,11 +437,21 @@ def main():
                     axis=1
                 )
                 df_bates.to_excel(writer, sheet_name="Bates Numbers", index=False)
+            if not df_files.empty:
+                df_files["References"] = df_files.apply(
+                    lambda row: save_large_json(
+                        row["References"],
+                        base_filename=f"{row['Matched String'][:50].strip().replace('/', '_').replace(chr(92), '_')}_files",
+                        folder=json_folder
+                    ),
+                    axis=1
+                )
+                df_files.to_excel(writer, sheet_name="File Citations", index=False)
 
         format_excel(excel_path)
-        print(f"📘 Excel saved to {excel_path}")
+        print(f"[OK] Excel saved to {excel_path}")
     else:
-        print(f"❌ no references or links found")
+        print("[ERR] no references or links found")
 
 
 
