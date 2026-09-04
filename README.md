@@ -28,12 +28,17 @@ specific links or terms without opening each file by hand.
 - **Bates numbering — body** (`--bates-body`): scans each page's visible
   text/content for *any* Bates-style reference numbers (letter prefix +
   padded digit run, e.g. `ACME-000123`), regardless of prefix — not just the
-  page's own stamp. Useful for catching Bates numbers cited in the document
-  body that reference other document sets. Each match gets its own `Context`
-  snippet, and results are grouped into a dedicated `Bates Numbers` sheet
-  (same structure as the `Keywords` sheet). Can be combined with
-  `--bates-footer-prefix`, which is attached to each body match's reference
-  entry for cross-referencing.
+  page's own stamp. Citations that carry a dotted page suffix (a page or
+  page range offset into the root document, e.g. `ACME0000123.8`,
+  `ACME0000123.25-26`, `ACME0000456.542-550`) are split into the base
+  Bates ID and the cited page. All occurrences of a given Bates ID are
+  grouped onto one row, and the cited pages are merged into a minimal
+  superset of ranges shown in a `Cited Page Range` column
+  (e.g. `8, 25-26`). Individual occurrences still appear in the
+  `References` list with their own `Cited Page` value. Each match keeps its
+  own `Context` snippet. Results are written to a dedicated `Bates Numbers`
+  sheet. Can be combined with `--bates-footer-prefix`, which is attached to
+  each body match's reference entry for cross-referencing.
 - **File citation search** (`--source-code`, `--file-ext`): scans each
   page's visible text for citations of file names — either common source-code
   file names (`.py`, `.js`, `.ts`, `.java`, `.c`, ...) via `--source-code`,
@@ -180,8 +185,10 @@ incrementing with `_1`, `_2`, ... if the name is already taken), containing:
     keyword, with `Match Type`, `Reference Count`, and `References` (same
     structure as above).
   - **`Bates Numbers` sheet** (if `--bates-body` used): one row per unique
-    Bates-style number found anywhere in the page content, with
-    `Reference Count` and `References` (filename/page/context for every
+    Bates ID found anywhere in the page content (citations that differ only
+    by a page suffix are grouped together), with `Cited Page Range`
+    (superset of all cited page offsets, e.g. `8, 25-26`), `Reference
+    Count`, and `References` (filename/page/`Cited Page`/context for every
     occurrence, plus `Bates ID (Footer)` if that option was also used).
   - **`File Citations` sheet** (if `--source-code` and/or `--file-ext`
     used): one row per unique cited file path, with `Match Type`

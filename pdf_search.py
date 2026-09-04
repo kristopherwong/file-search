@@ -13,8 +13,63 @@ import json
 # === REGEX ===
 url_regex = re.compile(r"https?://[^\s<>)\"']+")
 # Generic Bates-style reference number: a short letter prefix followed by a
-# padded run of digits (e.g. "ACME-000123", "SMITH_0001234", "ABC000123").
-generic_bates_regex = re.compile(r"\b[A-Za-z]{1,10}[_\-]?\d{3,10}\b")
+# padded run of digits (e.g. "ACME-000123", "SMITH_0001234", "ABC000123"),
+# optionally followed by a dotted page (or page range) suffix, such as
+#   ACME0000123.8              -> single page offset
+#   ACME0000123.25-26          -> range of page offsets
+#   ACME0000456.542-550        -> range of page offsets
+# Group 1 = base Bates ID; group 2 = optional ".suffix" (including the dot);
+# group 0 = the full citation as it appeared in the source text.
+generic_bates_regex = re.compile(
+    r"\b([A-Za-z]{1,10}[_\-]?\d{3,10}\b)"
+    r"(\.\d+(?:[-\u2013]\d+)?)"
+    r"?"
+)
+
+def parse_page_range(suffix):
+    """Parse a Bates suffix such as '8' or '25-26' (or '.25-26') into a
+    (start, end) tuple of ints. Returns None if the suffix is missing or
+    unparseable. Accepts both ASCII hyphens and en/em dashes."""
+    if not suffix:
+        return None
+    s = str(suffix).strip().lstrip(".").strip()
+    s = s.replace("\u2013", "-").replace("\u2014", "-")
+    if "-" in s:
+        start_s, end_s = s.split("-", 1)
+    else:
+        start_s = end_s = s
+    try:
+        start = int(start_s)
+        end = int(end_s)
+    except ValueError:
+        return None
+    if end < start:
+        start, end = end, start
+    return (start, end)
+
+def merge_page_ranges(ranges):
+    """Merge a list of (start, end) tuples into a minimal, sorted set of
+    non-overlapping ranges. Ranges that touch (e.g. (1,5)+(6,10)) are
+    combined into a single range (e.g. (1,10))."""
+    if not ranges:
+        return []
+    ordered = sorted((int(s), int(e)) for (s, e) in ranges)
+    merged = [list(ordered[0])]
+    for s, e in ordered[1:]:
+        cur = merged[-1]
+        if s <= cur[1] + 1:
+            cur[1] = max(cur[1], e)
+        else:
+            merged.append([s, e])
+    return [tuple(r) for r in merged]
+
+def format_merged_ranges(merged):
+    """Render a list of (start, end) tuples as a compact string, e.g.
+    [(8, 8), (25, 26)] -> '8, 25-26'."""
+    parts = []
+    for s, e in merged:
+        parts.append(str(s) if s == e else f"{s}-{e}")
+    return ", ".join(parts)
 
 # Known source code file extensions (used with --source-code)
 SOURCE_CODE_EXTENSIONS = [
@@ -181,19 +236,27 @@ def main():
                     bates_fields["Bates ID (Footer)"] = bates_id_footer
 
                 # Every Bates-style reference number found anywhere in the page's
-                # visible content, regardless of prefix, with surrounding context
+                # visible content, regardless of prefix, with surrounding context.
+                # Citations may carry a dotted page suffix (a page or page range
+                # offset into the root document, e.g. ACME0000456.542-550); that
+                # suffix is captured separately so it can be merged into a
+                # superset of cited page ranges in the report.
                 if args.bates_body:
                     for match in generic_bates_regex.finditer(text):
+                        bates_id = match.group(1)  # base Bates ID (no suffix)
                         match_start = match.start()
                         match_end = match.end()
                         context = clean_context_string(
                             extract_context(text, match_start, match_end, args.context_window)
                         )
+                        suffix = (match.group(2) or "").lstrip(".")  # e.g. "" "8" "25-26" "542-550"
                         bates_results.append({
                             "Filename": filename,
                             "Page": page_num,
                             "Match Type": "bates_body",
-                            "Matched String": match.group(),
+                            "Bates ID": bates_id,
+                            "Cited Page": suffix,
+                            "Matched String": match.group(0),
                             "Context": context,
                             **bates_fields
                         })
@@ -350,30 +413,45 @@ def main():
         # Create dataframe from raw body Bates number results
         df_bates_raw = pd.DataFrame(bates_results)
 
-        # Group by exact matched Bates number
-        grouped_bates = df_bates_raw.groupby("Matched String")
+        # Group by the base Bates ID, so that citations that differ only by
+        # their page suffix (e.g. ACME0000123.8 and ACME0000123.25-26)
+        # collapse onto a single row.
+        grouped_bates = df_bates_raw.groupby("Bates ID")
         bates_columns = [c for c in ("Bates ID (Footer)",) if c in df_bates_raw.columns]
 
         merged_bates_rows = []
 
-        for bates_number, group in grouped_bates:
+        for bates_id, group in grouped_bates:
             references = group.apply(
                 lambda row: {
                     "Filename": row["Filename"],
                     "Page": row["Page"],
+                    "Cited Page": row["Cited Page"],
+                    "Matched String": row["Matched String"],
                     "Context": row["Context"],
                     **{col: row[col] for col in bates_columns}
                 }, axis=1
             ).tolist()
 
+            # Collect the page offset cited by each occurrence (only those that
+            # carried a suffix) and merge them into superset ranges of pages
+            # being cited.
+            ranges = [
+                r
+                for r in (parse_page_range(ref["Cited Page"]) for ref in references)
+                if r is not None
+            ]
+            merged_ranges = merge_page_ranges(ranges)
+
             merged_bates_rows.append({
-                "Matched String": bates_number,
+                "Bates ID": bates_id,
+                "Cited Page Range": format_merged_ranges(merged_ranges),
                 "Reference Count": len(references),
                 "References": references
             })
 
         df_bates = pd.DataFrame(merged_bates_rows)
-        df_bates.sort_values(by=["Reference Count", "Matched String"], ascending=[False, True], inplace=True)
+        df_bates.sort_values(by=["Reference Count", "Bates ID"], ascending=[False, True], inplace=True)
 
     if file_results:
         # Create dataframe from raw file-citation results
@@ -431,7 +509,7 @@ def main():
                 df_bates["References"] = df_bates.apply(
                     lambda row: save_large_json(
                         row["References"],
-                        base_filename=f"{row['Matched String'][:50].strip().replace('/', '_')}_bates",
+                        base_filename=f"{row['Bates ID'][:50].strip().replace('/', '_')}_bates",
                         folder=json_folder
                     ),
                     axis=1
