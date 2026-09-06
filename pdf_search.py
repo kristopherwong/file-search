@@ -27,6 +27,33 @@ def build_file_pattern(extensions):
     ext_alts = "|".join(re.escape(e) for e in extensions)
     return re.compile(rf"\b[\w.\-/\\]+\.(?:{ext_alts})\b", re.IGNORECASE)
 
+def _is_file_path(name):
+    return ("/" in name) or ("\\" in name)
+
+def _file_basename(name):
+    return re.split(r"[\\/]", name.strip())[-1].lower()
+
+def canonicalize_file_citations(matched_strings):
+    """Collapse a bare filename (no directory) into a full-path citation when a
+    single full path ends in the same basename (e.g. "Utils.java" ->
+    ".../com/acme/app/Utils.java"). Returns a {name: representative} map;
+    names absent from the map are left unchanged. Only merges when the full path
+    is unambiguous (exactly one such path), so distinct files sharing a basename
+    are never wrongly combined."""
+    distinct = set(matched_strings)
+    paths_by_basename = {}
+    for s in distinct:
+        if _is_file_path(s):
+            paths_by_basename.setdefault(_file_basename(s), set()).add(s)
+    mapping = {}
+    for s in distinct:
+        if _is_file_path(s):
+            continue
+        candidates = paths_by_basename.get(_file_basename(s), set())
+        if len(candidates) == 1:
+            mapping[s] = next(iter(candidates))
+    return mapping
+
 def get_base_url(url):
     try:
         parsed = urlparse(url)
@@ -376,6 +403,16 @@ def main():
         df_bates.sort_values(by=["Reference Count", "Matched String"], ascending=[False, True], inplace=True)
 
     if file_results:
+        # Collapse bare filenames into their single matching full-path citation
+        # (e.g. "Utils.java" -> ".../com/acme/app/Utils.java") so they no
+        # longer appear as separate entries.
+        canonical_map = canonicalize_file_citations(
+            [r["Matched String"] for r in file_results]
+        )
+        for r in file_results:
+            if r["Matched String"] in canonical_map:
+                r["Matched String"] = canonical_map[r["Matched String"]]
+
         # Create dataframe from raw file-citation results
         df_files_raw = pd.DataFrame(file_results)
 
