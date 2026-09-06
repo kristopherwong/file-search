@@ -20,5 +20,8 @@ __pycache__/
 venv/
 env/
 
+# AI helper files
+AGENTS.md
+
 # macOS
 .DS_Store
