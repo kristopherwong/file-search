@@ -43,6 +43,13 @@ specific links or terms without opening each file by hand.
   `File Citations` sheet (same structure as the `Bates Numbers` sheet). Useful
   for finding where a brief, memo, or transcript cites particular source files
   or documents by name.
+
+  - **Path reconstruction**: a file path that the PDF wrapped across several
+    lines (one path segment per line, each ending in `/` or `\`) is folded
+    back into a single full-path entry rather than being reported only as its
+    last segment. A bare filename is also collapsed into the one unambiguous
+    full path that ends in the same name. Paths embedded in prose (e.g.
+    "see C:\repo\...") are intentionally left as-is to avoid over-matching.
 - **Context extraction**: each match includes surrounding text
   (`--context-window` characters before/after) to help you see it in
   context without opening the source PDF.
