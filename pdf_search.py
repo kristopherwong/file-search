@@ -124,6 +124,7 @@ def reconstruct_wrapped_path(text, match_start, match_end, max_lines=20, max_cha
             and (
                 seg[-1] in "/\\"
                 or (seg[-1] in "-_"
+                    and not full_starts_with_tag
                     and re.search(r"[A-Za-z]", seg)
                     and re.search(r"[\\/]", full)
                     and (
