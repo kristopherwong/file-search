@@ -12,9 +12,17 @@ import json
 
 # === REGEX ===
 url_regex = re.compile(r"https?://[^\s<>)\"']+")
-# Generic Bates-style reference number: a short letter prefix followed by a
-# padded run of digits (e.g. "ACME-000123", "SMITH_0001234", "ABC000123").
-generic_bates_regex = re.compile(r"\b[A-Za-z]{1,10}[_\-]?\d{3,10}\b")
+# Generic Bates-style reference number: a letter prefix (any length — production
+# sets can carry long prefixes) followed by a padded run of 3-10 digits
+# (e.g. "ACME-000123", "SMITH_0001234", "ABC000123"). A *page* citation may
+# follow, joined by a dot or underscore and captured with the number:
+# "CURRENCYAMZN00000010.00002", "AMAZON1461_00000726", ".5-8" (en/em-dash
+# ranges too). Prose tokens with no page tail (e.g. "MT8169", "Spot-2024")
+# match the base but are dropped later because they carry no cited page.
+generic_bates_regex = re.compile(
+    r"\b[A-Za-z]{1,20}[_\-]?\d{3,10}"
+    r"(?:[._]\d{1,8}(?:[-\u2013\u2014]\d{1,8})?)?"
+)
 
 # Known source code file extensions (used with --source-code)
 SOURCE_CODE_EXTENSIONS = [
@@ -390,6 +398,46 @@ def format_excel(filepath):
 def format_references_to_json(refs):
     return json.dumps(refs, indent=2, ensure_ascii=False)
 
+# --- Cited-page range helpers (Bates deliverable) ---
+def parse_page_range(page_str):
+    """Parse a cited-page string ("12", "5-8", "10-12,15") into a flat list of
+    page numbers (ints). Returns [] for empty / non-numeric input."""
+    if not page_str:
+        return []
+    pages = []
+    for part in str(page_str).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        rng = re.match(r"^(\d+)\s*[-\u2013\u2014]\s*(\d+)$", part)
+        if rng:
+            lo, hi = int(rng.group(1)), int(rng.group(2))
+            if hi < lo:
+                lo, hi = hi, lo
+            pages.extend(range(lo, hi + 1))
+        elif re.match(r"^\d+$", part):
+            pages.append(int(part))
+    return pages
+
+def merge_page_ranges(pages):
+    """Merge a flat list of page numbers into sorted contiguous (lo, hi) ranges."""
+    if not pages:
+        return []
+    s = sorted(set(pages))
+    out, lo, hi = [], s[0], s[0]
+    for p in s[1:]:
+        if p == hi + 1:
+            hi = p
+        else:
+            out.append((lo, hi))
+            lo = hi = p
+    out.append((lo, hi))
+    return out
+
+def format_merged_ranges(ranges):
+    """Format (lo, hi) ranges as "5-8, 11-12" (single pages as "11")."""
+    return ", ".join(str(lo) if lo == hi else f"{lo}-{hi}" for lo, hi in ranges)
+
 def main():
     args = parse_args()
     output_dir = get_unique_output_folder(os.path.splitext(os.path.basename(args.output))[0])
@@ -641,33 +689,61 @@ def main():
         df_keywords.sort_values(by=["Reference Count", "Matched String"], ascending=[False, True], inplace=True)
 
     if bates_results:
-        # Create dataframe from raw body Bates number results
+        # Create dataframe from raw body Bates number results. A "Bates ID" is
+        # the letter+number prefix; a page citation (".NN[-NN]" or "_NNNNNN")
+        # is a reference to a specific page of that Bates number and is folded
+        # into a per-ID "Cited Page Range" column rather than being treated as a
+        # separate entry. A genuine Bates citation in this corpus always names a
+        # page, so IDs that never carry a page (prose tokens like "MT8169",
+        # "Spot-2024") are dropped — they are model numbers, not Bates numbers.
         df_bates_raw = pd.DataFrame(bates_results)
-
-        # Group by exact matched Bates number
-        grouped_bates = df_bates_raw.groupby("Matched String")
         bates_columns = [c for c in ("Bates ID (Footer)",) if c in df_bates_raw.columns]
 
+        def bates_id_of(matched):
+            m = re.match(r"^([A-Za-z0-9]+?[_\-]?\d+)", str(matched))
+            return m.group(1) if m else str(matched)
+
+        def cited_page_of(matched, bates_id):
+            tail = str(matched)[len(bates_id):]
+            m = re.match(r"^\s*[._]\s*(\d+)", tail)
+            return m.group(1) if m else ""
+
+        raw_rows = df_bates_raw.to_dict("records")
+        per_id = {}
+        for r in raw_rows:
+            bid = bates_id_of(r["Matched String"])
+            cp = cited_page_of(r["Matched String"], bid)
+            entry = per_id.setdefault(
+                bid, {"pages": [], "ref_count": 0, "references": []}
+            )
+            if cp:
+                entry["pages"].extend(parse_page_range(cp))
+            entry["ref_count"] += 1
+            entry["references"].append({
+                "Filename": r["Filename"],
+                "Page": r["Page"],
+                "Cited Page": cp,
+                "Matched String": r["Matched String"],
+                "Context": r["Context"],
+                **{col: r[col] for col in bates_columns}
+            })
+
         merged_bates_rows = []
-
-        for bates_number, group in grouped_bates:
-            references = group.apply(
-                lambda row: {
-                    "Filename": row["Filename"],
-                    "Page": row["Page"],
-                    "Context": row["Context"],
-                    **{col: row[col] for col in bates_columns}
-                }, axis=1
-            ).tolist()
-
+        for bid, data in per_id.items():
+            if not data["pages"]:
+                continue
+            ranges = merge_page_ranges(data["pages"])
             merged_bates_rows.append({
-                "Matched String": bates_number,
-                "Reference Count": len(references),
-                "References": references
+                "Bates ID": bid,
+                "Cited Page Range": format_merged_ranges(ranges),
+                "Cited Page Min": str(min(ranges[0])) if ranges else "",
+                "Cited Page Max": str(max(r[-1] for r in ranges)) if ranges else "",
+                "Reference Count": data["ref_count"],
+                "References": data["references"],
             })
 
         df_bates = pd.DataFrame(merged_bates_rows)
-        df_bates.sort_values(by=["Reference Count", "Matched String"], ascending=[False, True], inplace=True)
+        df_bates.sort_values(by=["Reference Count", "Bates ID"], ascending=[False, True], inplace=True)
 
     if file_results:
         # Collapse bare filenames into their single matching full-path citation
@@ -732,10 +808,15 @@ def main():
 )
                 df_keywords.to_excel(writer, sheet_name="Keywords", index=False)
             if not df_bates.empty:
+                _bates_ptr = lambda row: (
+                    f"{str(row['Bates ID'])}_"
+                    f"{str(row['Cited Page Range']).replace(',', '_').replace(' ', '_')}_bates"
+                    if row["Cited Page Range"] else f"{str(row['Bates ID'])}_bates"
+                )
                 df_bates["References"] = df_bates.apply(
                     lambda row: save_large_json(
                         row["References"],
-                        base_filename=f"{row['Matched String'][:50].strip().replace('/', '_')}_bates",
+                        base_filename=_bates_ptr(row)[:90],
                         folder=json_folder
                     ),
                     axis=1
